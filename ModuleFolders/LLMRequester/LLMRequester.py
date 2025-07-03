@@ -4,6 +4,7 @@ from ModuleFolders.LLMRequester.CohereRequester import CohereRequester
 from ModuleFolders.LLMRequester.GoogleRequester import GoogleRequester
 from ModuleFolders.LLMRequester.AnthropicRequester import AnthropicRequester
 from ModuleFolders.LLMRequester.AmazonbedrockRequester import AmazonbedrockRequester
+from ModuleFolders.LLMRequester.AmazonTranslateRequester import AmazonTranslateRequester
 from ModuleFolders.LLMRequester.OpenaiRequester import OpenaiRequester
 from ModuleFolders.LLMRequester.DashscopeRequester import DashscopeRequester
 
@@ -40,14 +41,14 @@ class LLMRequester():
                 system_prompt,
                 platform_config,
             )
-        elif target_platform == "google" or (target_platform.startswith("custom_platform_") and api_format == "Google"):
+        elif target_platform == "google" or (target_platform and target_platform.startswith("custom_platform_") and api_format == "Google"):
             google_requester = GoogleRequester()
             skip, response_think, response_content, prompt_tokens, completion_tokens = google_requester.request_google(
                 messages,
                 system_prompt,
                 platform_config,
             )
-        elif target_platform == "anthropic" or (target_platform.startswith("custom_platform_") and api_format == "Anthropic"):
+        elif target_platform == "anthropic" or (target_platform and target_platform.startswith("custom_platform_") and api_format == "Anthropic"):
             anthropic_requester = AnthropicRequester()
             skip, response_think, response_content, prompt_tokens, completion_tokens = anthropic_requester.request_anthropic(
                 messages,
@@ -61,6 +62,22 @@ class LLMRequester():
                 system_prompt,
                 platform_config,
             )
+        elif target_platform == "amazontranslate":
+            amazon_translate_requester = AmazonTranslateRequester()
+            skip, response_think, response_content, prompt_tokens, completion_tokens = amazon_translate_requester.request_amazon_translate(
+                messages,
+                system_prompt,
+                platform_config,
+            )
+            # 确保返回值不为None
+            if response_think is None:
+                response_think = ""
+            if response_content is None:
+                response_content = ""
+            if prompt_tokens is None:
+                prompt_tokens = 0
+            if completion_tokens is None:
+                completion_tokens = 0
         elif target_platform == "dashscope":
             dashscope_requester = DashscopeRequester()
             skip, response_think, response_content, prompt_tokens, completion_tokens = dashscope_requester.request_openai(

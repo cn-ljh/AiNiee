@@ -197,7 +197,8 @@ class PlatformPage(QFrame, Base):
             "api_settings":{
                         "translate": None,
                         "polish": None,
-                        "format": None
+                        "format": None,
+                        "retry": None
                         }
         }
 
@@ -553,6 +554,7 @@ class PlatformPage(QFrame, Base):
             "translate": self.tra("翻译接口"),
             "polish": self.tra("润色接口"),
             "format": self.tra("排版接口"),
+            "retry": self.tra("重试接口"),
         }
         
         # 从配置中加载已保存的设置

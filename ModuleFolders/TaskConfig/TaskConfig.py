@@ -200,6 +200,8 @@ class TaskConfig(Base):
             target_platform = self.api_settings["polish"]
         elif platform_type == "formatReq":
             target_platform = self.api_settings["format"]
+        elif platform_type == "retryReq":
+            target_platform = self.api_settings.get("retry")
 
         api_url = self.base_url
         api_key = self.get_next_apikey()
@@ -241,6 +243,3 @@ class TaskConfig(Base):
 
 
         return params
-
-
-

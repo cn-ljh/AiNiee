@@ -275,6 +275,11 @@ class TaskExecutor(Base):
                     future = executor.submit(task.start)
                     future.add_done_callback(self.task_done_callback)  # 为future对象添加一个回调函数，当任务完成时会被调用，更新数据
 
+        # 检查是否还有未翻译的内容，如果有则尝试使用重试接口
+        final_untranslated_count = self.cache_manager.get_item_count_by_status(TranslationStatus.UNTRANSLATED)
+        if final_untranslated_count > 0:
+            self.try_retry_translation_for_remaining()
+
         # 等待可能存在的缓存文件写入请求处理完毕
         time.sleep(CacheManager.SAVE_INTERVAL)
 
@@ -390,7 +395,7 @@ class TaskExecutor(Base):
                 self.project_status_data.total_line = item_count_status_unpolishd
 
             # 第二轮开始对半切分
-            if current_round > 0:
+            if current_round >0:
                 self.config.lines_limit = max(1, int(self.config.lines_limit / 2))
                 self.config.tokens_limit = max(1, int(self.config.tokens_limit / 2))
 
@@ -487,6 +492,189 @@ class TaskExecutor(Base):
 
 
 
+    # 尝试使用重试接口翻译剩余未完成的内容
+    def try_retry_translation_for_remaining(self) -> None:
+        """
+        当多轮翻译仍然失败时，尝试使用重试接口对未完成的部分进行再次翻译
+        """
+        try:
+            # 检查是否配置了重试接口
+            config_dict = self.load_config()
+            api_settings = config_dict.get("api_settings", {})
+            retry_platform = api_settings.get("retry")
+            
+            if not retry_platform:
+                self.info("未配置重试接口，跳过重试翻译")
+                return
+
+            # 获取未翻译的条目数量
+            untranslated_count = self.cache_manager.get_item_count_by_status(TranslationStatus.UNTRANSLATED)
+            if untranslated_count == 0:
+                return
+
+            self.print("")
+            self.info(f"多轮翻译后仍有 {untranslated_count} 条未翻译内容，尝试使用重试接口进行翻译...")
+            self.print("")
+
+            # 保存原始配置
+            original_platform = self.config.target_platform
+            original_base_url = self.config.base_url
+            original_model = self.config.model
+            
+            # 获取重试接口的完整配置
+            retry_platform_config = config_dict.get("platforms", {}).get(retry_platform, {})
+            
+            # 调试信息：显示重试平台信息
+            self.info(f"调试信息 - 重试平台名称: '{retry_platform}'")
+            self.info(f"调试信息 - 平台名称类型: {type(retry_platform)}")
+            self.info(f"调试信息 - 是否为amazontranslate: {retry_platform == 'amazontranslate'}")
+            
+            # 临时切换到重试接口配置
+            self.config.target_platform = retry_platform
+            
+            # Amazon Translate特殊处理：不需要base_url和model_name
+            if retry_platform == "amazontranslate":
+                # Amazon Translate只需要AWS凭证配置
+                self.config.base_url = ""  # Amazon Translate不使用base_url
+                self.config.model = "amazon-translate"  # 使用固定标识
+                
+                # 验证AWS配置
+                if not retry_platform_config.get("access_key") or not retry_platform_config.get("secret_key"):
+                    self.warning("Amazon Translate重试接口缺少AWS凭证配置，跳过重试翻译")
+                    return
+                
+            else:
+                # 其他平台的常规验证
+                if not retry_platform_config.get("api_url"):
+                    self.warning(f"重试接口 {retry_platform} 的api_url未配置，跳过重试翻译")
+                    return
+                    
+                if not retry_platform_config.get("model"):
+                    self.warning(f"重试接口 {retry_platform} 的model未配置，跳过重试翻译")
+                    return
+                
+                # 设置常规配置
+                self.config.base_url = retry_platform_config.get("api_url", "")
+                self.config.model = retry_platform_config.get("model", "")
+                self.config.api_key = retry_platform_config.get("api_key", "")
+            
+            # 重新初始化翻译平台配置
+            if hasattr(self.config, 'prepare_for_translation'):
+                self.config.prepare_for_translation(TaskType.TRANSLATION)
+
+            # 使用较小的批次大小进行重试（避免再次失败）
+            retry_lines_limit = max(1, int(self.config.lines_limit / 4))  # 使用1/4的批次大小
+            retry_tokens_limit = max(1, int(self.config.tokens_limit / 4))
+
+            # 生成重试任务的数据块
+            chunks, previous_chunks, file_paths = self.cache_manager.generate_item_chunks(
+                "line" if self.config.tokens_limit_switch == False else "token",
+                retry_lines_limit if self.config.tokens_limit_switch == False else retry_tokens_limit,
+                self.config.pre_line_counts,
+                TaskType.TRANSLATION
+            )
+
+            # 生成重试翻译任务列表
+            retry_tasks_list = []
+            self.info(f"正在生成重试翻译任务...")
+            for chunk, previous_chunk, file_path in tqdm(zip(chunks, previous_chunks, file_paths), desc="生成重试任务", total=len(chunks)):
+                # 确定该任务的主语言
+                language_stats = self.cache_manager.project.get_file(file_path).language_stats
+                file_source_lang = get_source_language_for_file(self.config.source_language, self.config.target_language, language_stats)
+
+                task = TranslatorTask(self.config, self.plugin_manager, self.request_limiter, file_source_lang)
+                task.set_items(chunk)
+                task.set_previous_items(previous_chunk)
+                task.prepare(self.config.target_platform)
+                retry_tasks_list.append(task)
+
+            self.info(f"已生成 {len(retry_tasks_list)} 个重试翻译任务")
+            self.print("")
+
+            # 输出重试接口信息和调试信息
+            retry_platform_name = retry_platform_config.get("name", "未知")
+            self.info(f"重试接口名称 - {retry_platform_name}")
+            self.info(f"重试接口地址 - {self.config.base_url}")
+            self.info(f"重试模型名称 - {self.config.model}")
+            self.info(f"重试接口平台 - {self.config.target_platform}")
+            
+            # 调试信息：显示完整的重试配置
+            self.info(f"调试信息 - 重试平台配置: {retry_platform_config}")
+            self.info(f"调试信息 - API密钥前4位: {self.config.api_key[:4] if hasattr(self.config, 'api_key') and self.config.api_key else 'None'}...")
+            
+            # 验证base_url格式（Amazon Translate除外）
+            if retry_platform != "amazontranslate" and not self.config.base_url.startswith(('http://', 'https://')):
+                self.error(f"重试接口base_url格式错误: {self.config.base_url}")
+                self.error("base_url必须以http://或https://开头")
+                return
+            
+            self.print("")
+
+            self.info(f"开始执行重试翻译任务，任务数量为 {len(retry_tasks_list)}...")
+            time.sleep(2)
+            self.print("")
+
+            # 执行重试翻译任务（使用单线程，避免过载）
+            retry_success_count = 0
+            retry_total_count = len(retry_tasks_list)
+            
+            for i, task in enumerate(retry_tasks_list, 1):
+                # 检测是否需要停止任务
+                if Base.work_status == Base.STATUS.STOPING:
+                    break
+
+                self.info(f"执行重试任务 {i}/{retry_total_count}")
+                
+                try:
+                    result = task.start()
+                    if result and result.get("check_result", False):
+                        retry_success_count += 1
+                        
+                    # 更新统计信息
+                    if result:
+                        with self.project_status_data.atomic_scope():
+                            self.project_status_data.total_requests += 1
+                            self.project_status_data.error_requests += 0 if result.get("check_result") else 1
+                            self.project_status_data.line += result.get("row_count", 0)
+                            self.project_status_data.token += result.get("prompt_tokens", 0) + result.get("completion_tokens", 0)
+                            self.project_status_data.total_completion_tokens += result.get("completion_tokens", 0)
+                            self.project_status_data.time = time.time() - self.project_status_data.start_time
+                            
+                        # 触发进度更新
+                        self.emit(Base.EVENT.TASK_UPDATE, self.project_status_data.to_dict())
+                        
+                except Exception as e:
+                    self.error(f"重试任务执行错误: {str(e)}")
+                    
+                # 短暂延迟，避免请求过于频繁
+                time.sleep(0.5)
+
+            # 恢复原始配置
+            self.config.target_platform = original_platform
+            self.config.base_url = original_base_url
+            self.config.model = original_model
+
+            # 输出重试结果
+            final_untranslated_count = self.cache_manager.get_item_count_by_status(TranslationStatus.UNTRANSLATED)
+            self.print("")
+            if retry_success_count > 0:
+                self.info(f"重试翻译完成，成功翻译 {retry_success_count}/{retry_total_count} 个任务")
+                self.info(f"剩余未翻译条目：{final_untranslated_count} 条")
+            else:
+                self.warning("重试翻译未能成功翻译任何内容")
+                self.warning(f"仍有 {final_untranslated_count} 条内容未翻译")
+            self.print("")
+
+        except Exception as e:
+            self.error(f"重试翻译过程中发生异常: {str(e)}")
+            # 确保恢复原始配置
+            try:
+                self.config.target_platform = original_platform
+                self.config.base_url = original_base_url  
+                self.config.model = original_model
+            except:
+                pass
+
     # 单个翻译任务完成时,更新项目进度状态   
     def task_done_callback(self, future: concurrent.futures.Future) -> None:
         try:
@@ -514,4 +702,3 @@ class TaskExecutor(Base):
             self.emit(Base.EVENT.TASK_UPDATE, stats_dict)
         except Exception as e:
             self.error(f"翻译任务错误 ... {e}", e if self.is_debug() else None)
-

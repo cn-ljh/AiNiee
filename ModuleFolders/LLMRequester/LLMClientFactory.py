@@ -53,6 +53,10 @@ class LLMClientFactory:
                 cls._instance = super(LLMClientFactory, cls).__new__(cls)
                 cls._instance._clients = {}
             return cls._instance
+    
+    def __init__(self):
+        if not hasattr(self, '_clients'):
+            self._clients = {}
 
     def get_openai_client(self, config: Dict[str, Any]) -> OpenAI:
         """获取OpenAI客户端"""
@@ -119,6 +123,22 @@ class LLMClientFactory:
         key = ("google", api_key, api_url, extra_body_serialized)
         return self._get_cached_client(key, lambda: self._create_google_client(config))
 
+    def get_amazon_translate_client(self, config: Dict[str, Any]) -> Any:
+        """获取Amazon Translate客户端"""
+        region = config.get("region", "us-east-1")
+        access_key = config.get("access_key")
+        secret_key = config.get("secret_key")
+        key = ("amazon_translate", region, access_key, secret_key)
+        return self._get_cached_client(key, lambda: self._create_amazon_translate_client(config))
+
+    def get_amazon_comprehend_client(self, config: Dict[str, Any]) -> Any:
+        """获取Amazon Comprehend客户端"""
+        region = config.get("region", "us-east-1")
+        access_key = config.get("access_key")
+        secret_key = config.get("secret_key")
+        key = ("amazon_comprehend", region, access_key, secret_key)
+        return self._get_cached_client(key, lambda: self._create_amazon_comprehend_client(config))
+
     def _get_cached_client(self, key, factory_func):
         """线程安全地获取或创建客户端"""
         if key not in self._clients:
@@ -181,3 +201,37 @@ class LLMClientFactory:
             return genai.Client(api_key=api_key, http_options=http_options)
         else:
             return genai.Client(api_key=api_key)
+
+    def _create_amazon_translate_client(self, config):
+        session_kwargs = {
+            'region_name': config.get("region", "us-east-1")
+        }
+        
+        access_key = config.get("access_key")
+        secret_key = config.get("secret_key")
+        
+        if access_key and secret_key:
+            session_kwargs.update({
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key
+            })
+        
+        session = boto3.Session(**session_kwargs)
+        return session.client('translate')
+
+    def _create_amazon_comprehend_client(self, config):
+        session_kwargs = {
+            'region_name': config.get("region", "us-east-1")
+        }
+        
+        access_key = config.get("access_key")
+        secret_key = config.get("secret_key")
+        
+        if access_key and secret_key:
+            session_kwargs.update({
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key
+            })
+        
+        session = boto3.Session(**session_kwargs)
+        return session.client('comprehend')

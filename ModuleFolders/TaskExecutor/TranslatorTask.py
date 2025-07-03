@@ -297,3 +297,91 @@ class TranslatorTask(Base):
                 table.add_row(*row)
 
         return table
+
+    # 尝试使用重试接口进行翻译
+    def try_retry_translation(self) -> dict:
+        """
+        当主翻译接口失败时，尝试使用重试接口进行翻译
+        """
+        try:
+            # 检查是否配置了重试接口
+            retry_platform_config = self.config.get_platform_configuration("retryReq")
+            if not retry_platform_config or not retry_platform_config.get("target_platform"):
+                self.warning("未配置重试接口，跳过重试")
+                return None
+
+            self.info("主翻译接口失败，尝试使用重试接口进行翻译...")
+
+            # 使用重试接口发起请求
+            requester = LLMRequester()
+            skip, response_think, response_content, prompt_tokens, completion_tokens = requester.sent_request(
+                self.messages,
+                self.system_prompt,
+                retry_platform_config
+            )
+
+            # 如果重试接口也失败，返回None
+            if skip == True:
+                self.error("重试接口也失败了")
+                return None
+
+            # 提取回复内容
+            response_dict = ResponseExtractor.text_extraction(self, self.source_text_dict, response_content)
+
+            # 检查回复内容
+            check_result, error_content = ResponseChecker.check_response_content(
+                self,
+                self.config,
+                self.placeholder_order,
+                response_content,
+                response_dict,
+                self.source_text_dict,
+                self.source_lang
+            )
+
+            # 去除回复内容的数字序号
+            response_dict = ResponseExtractor.remove_numbered_prefix(self, response_dict)
+
+            # 模型回复日志
+            if response_think:
+                self.extra_log.append("重试接口思考内容：\n" + response_think)
+            if self.is_debug():
+                self.extra_log.append("重试接口回复内容：\n" + response_content)
+
+            # 检查译文
+            if check_result == False:
+                error = f"重试接口译文也未通过检查 - {error_content}"
+                self.error(error)
+                return None
+            else:
+                # 各种翻译后处理
+                restore_response_dict = copy.copy(response_dict)
+                restore_response_dict = self.text_processor.restore_all(
+                    self.config, 
+                    restore_response_dict, 
+                    self.prefix_codes, 
+                    self.suffix_codes, 
+                    self.placeholder_order, 
+                    self.affix_whitespace_storage
+                )
+
+                # 更新译文结果到缓存数据中
+                for item, response in zip(self.items, restore_response_dict.values()):
+                    with item.atomic_scope():
+                        item.model = retry_platform_config.get("model_name", "retry_model")
+                        item.translated_text = response
+                        item.translation_status = TranslationStatus.TRANSLATED
+
+                self.success("重试接口翻译成功")
+
+                # 返回成功结果
+                return {
+                    "check_result": True,
+                    "row_count": self.row_count,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                }
+
+        except Exception as e:
+            self.error(f"重试翻译过程中发生异常: {str(e)}")
+            return None
